@@ -1358,11 +1358,19 @@ function disableRoleButtons() {
   document.getElementById('instructorBtn').disabled = true;
 }
 
+function makeRetryButtonsAsStudent() {
+  document.getElementById('studentBtn').disabled = false;
+  document.getElementById('instructorBtn').disabled = false;
+  document.getElementById('studentBtn').innerHTML = "Retry";
+  document.getElementById('instructorBtn').innerHTML = "Start as Instructor instead"
+}
+
 async function startStudent() {
   settings = readSettings();
   const problem = checkSettings(settings);
   if (problem !== '') {
     log(problem);
+    makeRetryButtonsAsStudent();
     return;
   }
   disableRoleButtons();
@@ -1376,6 +1384,7 @@ async function startStudent() {
     const ok = await measureLoopback();
     if (!ok) {
       log('Could not hear our own chirps. Turn the volume up and reload the page.');
+      retryButtonsAsStudent();
       return;
     }
     // The own chirp must be booked after the instructor chirp is processed
@@ -1394,6 +1403,7 @@ async function startStudent() {
     }
   } catch (error) {
     log('ERROR: ' + error);
+    makeRetryButtonsAsStudent();
   }
 }
 
