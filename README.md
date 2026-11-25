@@ -196,5 +196,3 @@ code, and loading the cell files from a real web server.
    mic while chirping (`track.enabled = false`) is a fallback worth testing.
 10. **Background tabs.** Browsers slow down timers in background tabs. The instructor page
     books chirps 3 s ahead, but it should stay in front, and the laptop must not sleep.
-11. **Instructor commands** (run, pause and reset as chirp shapes) aren't built yet. Each
-    phone has its own Run button.

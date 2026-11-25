@@ -39,6 +39,7 @@
          font-size: 13px; white-space: pre-wrap; }
   button.on { background: #0a5a2a; border-color: #2ecc40; }
   select { font-size: 17px; padding: 4px; }
+  #monitorCanvas { width: 100vw; height: 50vh }
 </style>
 </head>
 <body>
@@ -72,6 +73,8 @@
   <span id="dot"></span><span id="status">Not started</span>
 </div>
 
+
+<!-- ==== BUTTONS FOR STUDENT ==== -->
 <div class="card" id="syncCard" hidden>
   <button id="syncHereBtn">Sync here (phone right next to the instructor speaker)</button>
   <button id="seatedBtn">I'm seated</button>
@@ -150,6 +153,19 @@
   <div id="cellControls"></div>
 </div>
 
+<!-- ==== BUTTONS FOR INSTRUCTOR ==== -->
+<div class="card" id="instructorCard" hidden>
+  <button id="instructorRunBtn">Run simulation</button>
+  <button id="instructorPauseBtn">Pause simulation</button>
+  <button id="instructorResetBtn">Reset cells</button>
+</div>
+
+<!-- ==== MONITOR ==== -->
+<div class="card" id="monitorCard" hidden>
+  <canvas id="monitorCanvas"></canvas>
+  <button id="monitorStartBtn">Start Monitor</button>
+</div>
+
 <h3>Log</h3>
 <div id="log"></div>
 
@@ -189,6 +205,7 @@
 //   11. The simulation and the cell file
 //   12. Screen and buttons
 //   13. Small group / expert mode (new in v2.6)
+//   14. Monitor of student chirps (only activation for now)
 //
 //  EXPERT MODE (v2.6), for about 10 students who know what they are doing.
 //  Turn it on in Settings or with ?expert=1. It adds:
@@ -240,8 +257,6 @@
 //      ("Sync here" / "I'm seated" again). Next step: an "I'm moving" button.
 //    - Shake chains: each hand-over adds a small error.
 //    - Counting neighbours is only reliable for 0–2 (see countChirps, part 4).
-//    - Instructor commands (run / pause / reset as chirp shapes) are not
-//      built yet: each phone has its own Run button.
 //
 //  JavaScript notes for beginners:
 //    - "const" makes a variable that is never re-assigned; "let" one that can be.
@@ -263,6 +278,7 @@ const SYNC_GAIN = 0.2;          // quiet: the two phones are touching
 const SYNC_CHIRPS = 5;          // sync chirps a synced phone plays after a shake
 const SHAKE_ACCELERATION = 15;  // m/s² (without gravity) that counts as a shake
 const MAX_MISSES = 3;           // missed instructor chirps in a row before we give up
+const INSTRUCTOR_COMMAND_BUFFER = 4800; // frames, the amount of frames that would buffer between instructor commands and normal chirping. Default 100ms, msToFrames(100)
 
 const SETTING_NAMES = ['periodMs', 'chirpMs', 'instructorChirpMs', 'gain', 'radiusM', 'threshold', 'maxRoomM'];
 let settings = null;
@@ -325,6 +341,10 @@ function computeFrames() {
 // 2. SMALL HELPERS
 // =====================================================================
 
+// variables for instructor commands
+
+let instructor_command = '';
+
 function log(text) {
   const box = document.getElementById('log');
   const time = new Date().toTimeString().substring(0, 8);
@@ -361,10 +381,13 @@ function wrapToPeriod(n) {
 // =====================================================================
 // 3. CHIRP SHAPES
 // =====================================================================
-// Three different shapes, so a phone always knows what it is hearing:
+// Six different shapes, so a phone always knows what it is hearing:
 //   student:    rising sweep 2.5 -> 5.5 kHz
 //   instructor: falling sweep 5.5 -> 2.5 kHz
 //   sync:       up then down (only used when shaking phones together)
+//   run:        rising sweep 6.0 -> 9.0 kHz
+//   pause:      falling sweep 9.0 -> 6.0 kHz
+//   reset:      rising sweep 9.5 -> 12.5 kHz
 
 // useCosine = true makes the same sweep with cos() instead of sin(): a copy
 // shifted by a quarter of a wave. Used by countChirps (part 4).
@@ -400,16 +423,28 @@ function makeUpDown(lowHz, highHz, durationMs, sampleRate) {
   return wave;
 }
 
-const templates = { student: null, studentCos: null, instructor: null, sync: null };
+const templates = { student: null, studentCos: null, instructor: null, sync: null, run: null, pause: null, reset: null };
 
 function makeTemplates() {
   templates.student = makeSweep(2500, 5500, settings.chirpMs, audio.sampleRate);
   templates.studentCos = makeSweep(2500, 5500, settings.chirpMs, audio.sampleRate, true);
   templates.instructor = makeSweep(5500, 2500, settings.instructorChirpMs, audio.sampleRate);
   templates.sync = makeUpDown(2500, 5500, 20, audio.sampleRate);
+
+  // instructor commands
+  templates.run = makeSweep(6000, 9000, settings.instructorChirpMs, audio.sampleRate);
+  templates.runCos = makeSweep(6000, 9000, settings.instructorChirpMs, audio.sampleRate, true);
+  templates.pause = makeSweep(9000, 6000, settings.instructorChirpMs, audio.sampleRate);
+  templates.pauseCos = makeSweep(9000, 6000, settings.instructorChirpMs, audio.sampleRate, true);
+  templates.reset = makeSweep(9500, 12500, settings.instructorChirpMs, audio.sampleRate);
+  templates.resetCos = makeSweep(12500, 9500, settings.instructorChirpMs, audio.sampleRate, true);
+
   sendWaveform('student', templates.student);
   sendWaveform('instructor', templates.instructor);
   sendWaveform('sync', templates.sync);
+  sendWaveform('run', templates.run);
+  sendWaveform('pause', templates.pause);
+  sendWaveform('reset', templates.reset);
 }
 
 
@@ -748,6 +783,7 @@ async function tryLoopback() {
 // tick is half a period before each instructor chirp. It does not listen.
 
 const instructorClock = { nextChirpFrame: 0 };
+const monitorClock = { nextTick: 0 };
 
 function bookInstructorChirps() {
   // Keep chirps booked 3 s ahead.
@@ -759,6 +795,18 @@ function bookInstructorChirps() {
     playAt(instructorClock.nextChirpFrame, 'instructor', INSTRUCTOR_GAIN);
     flashAtFrame(instructorClock.nextChirpFrame);
     instructorClock.nextChirpFrame = instructorClock.nextChirpFrame + frames.period;
+  }
+
+  // for instructor commands
+  if (instructor_command !== '') {
+    let play_time = instructorClock.nextChirpFrame + frames.quarter;
+    // remove the 3 second delay introduced by the previous while loop
+    while (play_time - msToFrames(1000) > nowFrame()) {
+      play_time -= msToFrames(1000);
+    }
+    playAt(play_time, instructor_command, INSTRUCTOR_GAIN);
+    log('Playing command \'' + instructor_command + '\' at ' + play_time +'!');
+    instructor_command = '';
   }
 }
 
@@ -808,6 +856,7 @@ function onInstructorWindow(samples, startFrame) {
   let heard = false;
   if (samples !== null) {
     const peak = strongestPeak(correlate(samples, templates.instructor));
+    if (settings.expert) log("Listening for threshold: " + settings.threshold + "; Peak: " + peak.value + ".");
     if (peak.value >= settings.threshold) {
       arrival = startFrame + peak.index;
       heard = true;
@@ -1221,9 +1270,46 @@ function runTick(tick) {
   if (loud.role !== '') {
     return; // the loudness test uses the ticks instead of the simulation
   }
-  if (!sim.running || sim.cell === null) {
-    return;
+  if (sim.cell === null) return;
+  // instructor command audio processing
+  let command_start = tick.frame + frames.quarter + frames.half - frames.before - frames.noise;
+  let command_length_incomplete = frames.noise + 2* frames.before + frames.maxDistance;
+  if (!tick.reliable) {
+    command_start -= frames.maxDistance;
+    command_length_incomplete += frames.maxDistance;
   }
+  // instructor commands
+  recordAt(command_start, command_length_incomplete + templates.run.length, function (samples) {
+    if (samples !== null) {
+      const peak = strongestPeak(correlate(samples, templates.run));
+      if (peak.value >= settings.threshold) {
+        sim.running = true;
+        document.getElementById('runBtn').textContent = sim.running ? 'Pause simulation' : 'Run simulation';
+        log('Simulation is now running due to instructor command.');
+      }
+      
+    }
+  });
+  recordAt(command_start, command_length_incomplete + templates.pause.length, function (samples) {
+    if (samples !== null) {
+      const peak = strongestPeak(correlate(samples, templates.pause));
+      if (peak.value >= settings.threshold) {
+        sim.running = false;
+        document.getElementById('runBtn').textContent = sim.running ? 'Pause simulation' : 'Run simulation';
+        log('Simulation is now paused due to instructor command.');
+      };
+    }
+  });
+  recordAt(command_start, command_length_incomplete + templates.reset.length, function (samples) {
+    if (samples !== null) {
+      const peak = strongestPeak(correlate(samples, templates.reset));
+      if (peak.value >= settings.threshold) {
+        resetCell();
+        log('Reset cell due to instructor command.');
+      };
+    }
+  });
+  if (!sim.running) return;
   if (sim.fireNext) {
     sim.fireNext = false;
     // Only a synced phone makes a sound; an unsynced one just flashes.
@@ -1423,10 +1509,14 @@ async function startInstructor() {
     computeFrames();
     makeTemplates();
     document.body.style.background = '#0b2a4a';
-    instructorClock.nextChirpFrame = nowFrame() + msToFrames(500);
+    const now = nowFrame();
+    instructorClock.nextChirpFrame = now + msToFrames(500);
+    monitorClock.nextTick = now;
     bookInstructorChirps();
     setInterval(bookInstructorChirps, 250);
     setInterval(updateScreen, 250);
+    document.getElementById('instructorCard').hidden = false;
+    document.getElementById('monitorCard').hidden = false;
   } catch (error) {
     log('ERROR: ' + error);
     makeRetryButtonsAsInstructor();
@@ -1800,6 +1890,72 @@ function showDetection(count) {
     'last ticks (F = fired): ' + expert.history.join(' ');
 }
 
+// =====================================================================
+// 14. MONITOR OF STUDENT CHIRPS (only activation for now)
+// =====================================================================
+
+// clocks for audio listening
+
+function monitorClockLoop() {
+  const lead = Math.round(frames.period * 0.2);
+  const now = nowFrame();
+  if (now < monitorClock.nextTick - lead) {
+    return; // not yet
+  }
+  if (now > monitorClock.nextTick - msToFrames(20)) {
+    // We are too late for this tick (the page was busy or in the background):
+    // skip ahead.
+    log('Monitor clock: a tick was skipped (page too slow)');
+    monitorClock.nextTick = monitorClock.nextTick + frames.period;
+    return;
+  }
+  // listen for student chirps
+  // PITFALL: may only be able to process one student chirp at a time (the lastest)
+  let start = monitorClock.nextTick - frames.before - frames.noise;
+  let length = frames.noise + 2* frames.before + frames.maxDistance + templates.student.length;
+  recordAt(start, length, function (samples) {
+    if (samples !== null) {
+      const peak = strongestPeak(correlate(samples, templates.student));
+      if (peak.value >= settings.threshold) {
+        log("=====STUDENT CHIRP=====");
+      }
+    }
+  });
+  monitorClock.nextTick = monitorClock.nextTick + frames.period;
+}
+
+// monitor canvas
+const monitorCanvas = document.getElementById('monitorCanvas');
+const mctx = monitorCanvas.getContext('2d');
+
+function renderMonitorCanvas() {
+  // render background
+  mctx.fillStyle = '#777777';
+  mctx.fillRect(0, 0, monitorCanvas.width, monitorCanvas.height);
+}
+
+function updateMonitorCanvas() {
+  // update canvas size based on window size
+  if (monitorCanvas.clientWidth) {
+    document.getElementById('monitorCanvas').width = monitorCanvas.clientWidth;
+  }
+  if (monitorCanvas.clientHeight) {
+    document.getElementById('monitorCanvas').height = monitorCanvas.clientHeight;
+  }
+  renderMonitorCanvas();
+}
+
+async function startMonitor() {
+  try {
+    await startAudio(true);
+    monitor_clock = setInterval(monitorClockLoop, 20);
+    document.getElementById('monitorStartBtn').disabled = true;
+    setInterval(updateMonitorCanvas, 250);
+  } catch (error) {
+    log('Error in startMonitor: ' + error.message);
+  }
+}
+
 // ---- tuning controls ----
 function showTuningValues() {
   document.getElementById('thresholdVal').textContent = settings.threshold;
@@ -1856,6 +2012,21 @@ function resetCell() {
   log('Cell reset');
 }
 
+// ---- functions for instructor buttons ----
+function instructorRun() {
+  // instructor_command must correspond to a template!
+  instructor_command = 'run';
+}
+
+function instructorPause() {
+  // instructor_command must correspond to a template!
+  instructor_command = 'pause';
+}
+function instructorReset() {
+  // instructor_command must correspond to a template!
+  instructor_command = 'reset';
+}
+
 // ---- expert buttons ----
 document.getElementById('clockSelect').addEventListener('change', function () {
   setClockSource(document.getElementById('clockSelect').value);
@@ -1891,6 +2062,14 @@ document.getElementById('seatedBtn').addEventListener('click', onSeated);
 document.getElementById('neighbourBtn').addEventListener('click', startNeighbourSync);
 document.getElementById('runBtn').addEventListener('click', onRun);
 window.addEventListener('devicemotion', onMotion);
+
+// ---- instructor buttons ----
+document.getElementById('instructorRunBtn').addEventListener('click', instructorRun);
+document.getElementById('instructorPauseBtn').addEventListener('click', instructorPause);
+document.getElementById('instructorResetBtn').addEventListener('click', instructorReset);
+
+// ---- monitor ----
+document.getElementById('monitorStartBtn').addEventListener('click', startMonitor);
 </script>
 </body>
 </html>
